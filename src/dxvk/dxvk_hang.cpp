@@ -384,14 +384,17 @@ namespace dxvk {
     path += env::getExeBaseName();
     path += "_device_fault.bin";
 
-    util::File file(path, util::FileFlag::Truncate);
+    util::File file(path, { util::FileFlag::AllowWrite, util::FileFlag::Truncate });
 
     if (!file) {
       Logger::err(str::format("Failed to open ", path));
       return;
     }
 
-    file.append(debugData.size(), debugData.data());
+    if (!file.append(debugData.size(), debugData.data())) {
+      Logger::err(str::format("Failed to write ", path));
+      return;
+    }
     Logger::err(str::format("Dumped device fault debug info to ", path));
   }
 
