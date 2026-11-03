@@ -713,6 +713,10 @@ namespace dxvk {
       return true;
     }
 
+    bool isEvicted() const {
+      return m_residency.load() == DxvkResourceResidency::Evicted;
+    }
+
     bool isOrgTracked() const {
       return m_orgTracks.load(std::memory_order_acquire) != 0u;
     }
@@ -730,6 +734,12 @@ namespace dxvk {
     uint64_t advanceOrgStorageSerial() {
       return ++m_orgStorageSerial;
     }
+
+    /**
+     * \brief Queries whether the resource can move
+     * \returns \c true if the backend can safely relocate the resource
+     */
+    virtual bool canRelocate() const = 0;
 
     /**
      * \brief Allocates new backing storage with constraints
