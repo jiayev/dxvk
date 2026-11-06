@@ -157,7 +157,8 @@ namespace dxvk {
     m_globalLayout = (m_info.sharing.mode != DxvkSharedHandleMode::Import)
       ? m_info.initialLayout : m_info.layout;
 
-    assignStorage(allocateStorage());
+    if (!m_info.deferStorage)
+      assignStorage(allocateStorage());
   }
 
 
@@ -193,6 +194,9 @@ namespace dxvk {
 
 
   bool DxvkImage::canRelocate() const {
+    if (m_storage == nullptr)
+      return false;
+
     return !m_imageInfo.mapPtr && !m_shared && !m_stableAddress
         && !(m_info.flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT);
   }
@@ -337,9 +341,10 @@ namespace dxvk {
     allocationInfo.handleType = m_info.sharing.type;
 
     // Only what is purely sampled can spill: whatever the GPU writes has to stay fast.
-    allocationInfo.spillable = !sharedMemoryInfo && !m_info.transient && !(imageInfo.usage & (
+    // Or what the application marked: a target it almost never uses costs nothing there.
+    allocationInfo.spillable = !sharedMemoryInfo && !m_info.transient && (isMarkedSpillable() || !(imageInfo.usage & (
       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT));
+      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)));
 
     if (m_info.transient)
       allocationInfo.mode.set(DxvkAllocationMode::NoDedicated);
@@ -564,7 +569,10 @@ namespace dxvk {
 
 
   void DxvkImage::updateDebugName() {
-    if (m_storage->flags().test(DxvkAllocationFlag::OwnsImage)) {
+    if (m_storage != nullptr && m_imageInfo.image)
+      DxvkCheckpointBuffer::setImageName(m_imageInfo.image, m_info.debugName);
+
+    if (m_storage != nullptr && m_storage->flags().test(DxvkAllocationFlag::OwnsImage)) {
       VkDebugUtilsObjectNameInfoEXT nameInfo = { VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
       nameInfo.objectType = VK_OBJECT_TYPE_IMAGE;
       nameInfo.objectHandle = vk::getObjectHandle(m_imageInfo.image);

@@ -666,6 +666,7 @@ namespace dxvk {
       dst.height = src.extent.height;
       dst.depth = src.extent.depth;
       dst.mipLevels = src.mipLevels;
+      dst.idleFrames = src.idleFrames;
       dst.layers = src.layers;
       dst.usage = src.usage;
       dst.owner = src.label.owner;
@@ -687,6 +688,24 @@ namespace dxvk {
           IUnknown*                   pObject,
     const char*                       pOwner,
           BOOL                        overwrite) {
+    // A label is no use of the texture: it must not allocate deferred storage.
+    Com<ID3D11ShaderResourceView> srv;
+    Com<ID3D11Resource> labelled;
+
+    if (SUCCEEDED(pObject->QueryInterface(__uuidof(ID3D11ShaderResourceView), reinterpret_cast<void**>(&srv))))
+      srv->GetResource(&labelled);
+    else
+      pObject->QueryInterface(__uuidof(ID3D11Resource), reinterpret_cast<void**>(&labelled));
+
+    if (labelled != nullptr) {
+      auto texture = GetCommonTexture(labelled.ptr());
+
+      if (texture && texture->GetImageWithoutStorage() != nullptr) {
+        m_device->GetDXVKDevice()->getMemoryAllocator().setResourceOwner(texture->GetImageWithoutStorage()->cookie(), pOwner, overwrite);
+        return S_OK;
+      }
+    }
+
     Rc<DxvkPagedResource> resource = ResolveResource(pObject, nullptr, nullptr);
 
     if (resource == nullptr)
@@ -1265,6 +1284,86 @@ extern "C" {
 
   DLLEXPORT void __stdcall dxvkConfigureMemoryDebug(uint32_t flags) {
     setMemoryDebugFlags(flags);
+  }
+
+
+  DLLEXPORT HRESULT __stdcall dxvkForceResourcePlacement(ID3D11Device* pDevice,
+    uint32_t count, const uint64_t* pCookies, BOOL toSystem, uint32_t* pQueued) {
+    if (!pQueued || (count && !pCookies))
+      return E_INVALIDARG;
+
+    Com<IDXGIVkInteropDevice1> ref;
+    auto interop = GetInterop(pDevice, ref);
+
+    if (!interop)
+      return E_NOINTERFACE;
+
+    *pQueued = interop->GetDXVKDevice()->getMemoryAllocator().forceResourcePlacement(count, pCookies, toSystem);
+    return S_OK;
+  }
+
+
+  DLLEXPORT HRESULT __stdcall dxvkSetResourcesSpillable(ID3D11Device* pDevice,
+    uint32_t count, const uint64_t* pCookies, BOOL spillable, uint32_t* pQueued) {
+    if (!pQueued || (count && !pCookies))
+      return E_INVALIDARG;
+
+    Com<IDXGIVkInteropDevice1> ref;
+    auto interop = GetInterop(pDevice, ref);
+
+    if (!interop)
+      return E_NOINTERFACE;
+
+    *pQueued = interop->GetDXVKDevice()->getMemoryAllocator().setResourcesSpillable(count, pCookies, spillable);
+    return S_OK;
+  }
+
+
+  DLLEXPORT HRESULT __stdcall dxvkStreamEnableView(ID3D11ShaderResourceView* pShell, PFN_D3D11StreamMissing pfnMissing,
+    PFN_D3D11StreamMissing pfnGone, PFN_D3D11StreamFill pfnFill, uint64_t user) {
+    if (!pShell)
+      return E_INVALIDARG;
+
+    Com<ID3D11Resource> resource;
+    pShell->GetResource(&resource);
+
+    auto texture = GetCommonTexture(resource.ptr());
+
+    if (!texture || !texture->IsStorageDeferred())
+      return E_FAIL;
+
+    if (!static_cast<D3D11ShaderResourceView*>(pShell)->EnableStream(pfnMissing, pfnGone, user))
+      return E_FAIL;
+
+    texture->SetStreamFill(pfnFill, user);
+    return S_OK;
+  }
+
+
+  DLLEXPORT void __stdcall dxvkStreamSetWindow(ID3D11ShaderResourceView* pShell, ID3D11ShaderResourceView* pWindow) {
+    static_cast<D3D11ShaderResourceView*>(pShell)->SetStreamWindow(static_cast<D3D11ShaderResourceView*>(pWindow));
+  }
+
+
+  DLLEXPORT ID3D11ShaderResourceView* __stdcall dxvkStreamGetWindow(ID3D11ShaderResourceView* pShell) {
+    return static_cast<D3D11ShaderResourceView*>(pShell)->GetStreamWindow();
+  }
+
+
+  DLLEXPORT uint64_t __stdcall dxvkStreamGetBinds(ID3D11ShaderResourceView* pShell) {
+    return static_cast<D3D11ShaderResourceView*>(pShell)->GetStreamBinds();
+  }
+
+
+  DLLEXPORT HRESULT __stdcall dxvkSetDefragPressurePercent(ID3D11Device* pDevice, uint32_t percent) {
+    Com<IDXGIVkInteropDevice1> ref;
+    auto interop = GetInterop(pDevice, ref);
+
+    if (!interop)
+      return E_NOINTERFACE;
+
+    interop->GetDXVKDevice()->getMemoryAllocator().setDefragPressurePercent(percent);
+    return S_OK;
   }
 
 

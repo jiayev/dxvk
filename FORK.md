@@ -245,6 +245,21 @@ a residual.
 `src/d3d11/d3d11_org_interop.{h,cpp}`, `src/d3d11/d3d11_interop.h`, `src/d3d11/d3d11_buffer.cpp`,
 `src/d3d11/d3d11_texture.cpp`*
 
+### Streamed textures
+
+Community Shaders streams game textures' mips (`docs/development/texture-streaming.md` in its repo). It keeps the texture and view the game holds
+as a storage-less **shell**, and puts the mips in an ordinary texture, the **window**.
+
+- `dxvkStreamEnableView` makes a view whose texture still has deferred storage a shell. It fails if the storage was committed.
+- `D3D11ShaderResourceView::GetImageView` returns the window's image view for a shell, so every bind reads it. With no window set, it calls the
+  client's missing callback on the binding thread, then reads zero if there is still none.
+- The check sits behind the existing deferred-storage test, so a view that is not a shell pays nothing new.
+- The client's gone callback runs first in the view's destructor, so the client can stop naming the view before it is destroyed.
+- If something commits a shell's own storage (`EnsureStorage`: a `Map`, a copy), `D3D11CommonTexture::CommitDeferredStorage` asks the client's fill
+  callback for the contents and initializes the image from them.
+- `dxvkStreamSetWindow`, `dxvkStreamGetWindow` and `dxvkStreamGetBinds` are any thread's. A rebind is what picks up a new window: a slot already
+  bound keeps reading the old one.
+
 ---
 
 ## 5. Bug fixes
@@ -324,6 +339,22 @@ BasicRHI's descriptor-buffer backend, that override is gone. Costs of heaps on N
 `dxvk.enableDescriptorHeap = True` opts back in, and BasicRHI follows.
 
 *File: `src/dxvk/dxvk_device_info.cpp`*
+
+---
+
+### SPIR-V shaders through the D3D11 entry points
+
+Community Shaders builds its game shaders with DXC, because the DXBC route costs GPU time, and passes them through the normal
+`Create*Shader` calls in a DXBC container with `ISGN`, `OSGN`, `SPRM` and `SPRV` chunks. Input layouts work as usual from `ISGN`.
+
+`d3d11_shader_spirv.cpp` adapts the module to DXVK's binding model: a binding's range names its register class
+(`D3D11SpirvShift*`, which the compiler is given as `-fvk-*-shift`), and samplers go through the global heap with their index in
+push data, the same layout as `DxvkIrShader`. The result is a `DxvkSpirvShader`. `dxvkSpirvIngestVersion` lets the client check
+the convention, and `dxvkSpirvContainerHash` gives it the container's hash.
+
+Design and measurements: `docs/development/dxc-game-shaders.md` in the CS repo.
+
+*Files: `src/d3d11/d3d11_shader_spirv.{h,cpp}`, `src/d3d11/d3d11_shader.{h,cpp}`, `src/d3d11/d3d11_device.cpp`, `src/d3d11/d3d11.def`*
 
 ---
 

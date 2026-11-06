@@ -182,7 +182,8 @@ namespace dxvk {
       m_info.Image.NumLayers = viewInfo.layerCount;
 
       // Create the underlying image view object
-      m_imageView = texture->GetImage()->createView(viewInfo);
+      m_imageView = texture->GetImageWithoutStorage()->createView(viewInfo);
+      m_deferredTexture.store(texture->IsStorageDeferred() ? texture : nullptr, std::memory_order_relaxed);
     }
   }
   
@@ -204,7 +205,73 @@ namespace dxvk {
   }
 
 
+  void D3D11ShaderResourceView::CommitDeferredTexture() const {
+    if (auto texture = m_deferredTexture.exchange(nullptr, std::memory_order_relaxed))
+      texture->EnsureStorage();
+  }
+
+
+  bool D3D11ShaderResourceView::EnableStream(PFN_D3D11StreamMissing pfnMissing, PFN_D3D11StreamMissing pfnGone, uint64_t user) {
+    if (m_stream || !m_deferredTexture.load(std::memory_order_relaxed))
+      return false;
+
+    auto stream = std::make_unique<StreamState>();
+    stream->missing = pfnMissing;
+    stream->gone = pfnGone;
+    stream->user = user;
+    m_stream = std::move(stream);
+    return true;
+  }
+
+
+  void D3D11ShaderResourceView::SetStreamWindow(D3D11ShaderResourceView* pWindow) {
+    if (!m_stream)
+      return;
+
+    // The old window's last release runs outside the lock.
+    Com<D3D11ShaderResourceView> window = pWindow;
+    std::lock_guard lock(m_stream->lock);
+    std::swap(m_stream->window, window);
+  }
+
+
+  D3D11ShaderResourceView* D3D11ShaderResourceView::GetStreamWindow() const {
+    if (!m_stream)
+      return nullptr;
+
+    std::lock_guard lock(m_stream->lock);
+    return m_stream->window.ref();
+  }
+
+
+  uint64_t D3D11ShaderResourceView::GetStreamBinds() const {
+    return m_stream ? m_stream->binds.load(std::memory_order_relaxed) : 0u;
+  }
+
+
+  Rc<DxvkImageView> D3D11ShaderResourceView::GetStreamedImageView() const {
+    m_stream->binds.fetch_add(1, std::memory_order_relaxed);
+    Com<D3D11ShaderResourceView> window;
+
+    { std::lock_guard lock(m_stream->lock);
+      window = m_stream->window;
+    }
+
+    if (!window && m_stream->missing) {
+      m_stream->missing(m_stream->user);
+
+      std::lock_guard lock(m_stream->lock);
+      window = m_stream->window;
+    }
+
+    return window ? window->GetImageView() : nullptr;
+  }
+
+
   D3D11ShaderResourceView::~D3D11ShaderResourceView() {
+    if (m_stream && m_stream->gone)
+      m_stream->gone(m_stream->user);
+
     m_destructionNotifier.Notify();
 
     ResourceReleasePrivate(m_resource);

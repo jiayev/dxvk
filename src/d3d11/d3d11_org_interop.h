@@ -540,6 +540,7 @@ typedef struct DxvkMemoryResourceRow {
   uint32_t mipLevels;
   uint32_t layers;
   uint32_t usage;         /* VkImageUsageFlags or VkBufferUsageFlags */
+  uint32_t idleFrames;    /* frames presented since a command list last used it */
   /** Interned strings, valid while the device lives; null when absent. */
   const char* owner;      /* the creating thread's owner scope */
   const char* kind;       /* DXVK's internal kind, e.g. "Staging buffer" */
@@ -620,6 +621,28 @@ typedef void (__stdcall *PFN_dxvkConfigureMemoryDebug)(uint32_t flags);
  */
 typedef HRESULT (__stdcall *PFN_dxvkGetResourceCreationStack)(ID3D11Device* pDevice,
   uint64_t cookie, void** pFrames, uint32_t capacity, uint32_t* pCount);
+
+/**
+ * For tests: moves live resources (DxvkMemoryResourceRow::cookie) to system
+ * memory and holds them there, or brings them back. *pQueued receives how many
+ * can move. A resource moves with one of the context's next submissions.
+ */
+typedef HRESULT (__stdcall *PFN_dxvkForceResourcePlacement)(ID3D11Device* pDevice,
+  uint32_t count, const uint64_t* pCookies, BOOL toSystem, uint32_t* pQueued);
+
+/**
+ * Moves images (DxvkMemoryResourceRow::cookie) into the spill pool, the memory
+ * the driver demotes first, or back out. For those the application knows it
+ * rarely uses. *pQueued receives how many can move.
+ */
+typedef HRESULT (__stdcall *PFN_dxvkSetResourcesSpillable)(ID3D11Device* pDevice,
+  uint32_t count, const uint64_t* pCookies, BOOL spillable, uint32_t* pQueued);
+
+/**
+ * The share of the driver's VRAM budget above which DXVK stops keeping slack in its
+ * memory chunks: defragmentation tightens and empty chunks go. 100 by default.
+ */
+typedef HRESULT (__stdcall *PFN_dxvkSetDefragPressurePercent)(ID3D11Device* pDevice, uint32_t percent);
 
 #ifdef __cplusplus
 }

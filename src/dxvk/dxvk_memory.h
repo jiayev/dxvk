@@ -125,6 +125,9 @@ namespace dxvk {
     VkDeviceSize nextChunkSize = MinChunkSize;
     /// Maximum chunk size for the memory pool. Hard limit.
     VkDeviceSize maxChunkSize = MaxChunkSize;
+    /// The largest chunk this memory type could use. Budget margins and the
+    /// choice of dedicated allocations are counted in it, not in maxChunkSize.
+    VkDeviceSize fullChunkSize = MaxChunkSize;
     /// Next chunk to relocate for defragmentation
     uint32_t nextDefragChunk = ~0u;
     /// Next chunk to evict resources from
@@ -159,6 +162,8 @@ namespace dxvk {
     VkMemoryHeap      properties    = { };
     bool              enforceBudget = false;
     bool              enableEviction = false;
+    /// The process' use of the heap is over the budget share setDefragPressurePercent names: slack is not kept.
+    bool              tightenDefrag = false;
   };
 
 
@@ -300,6 +305,7 @@ namespace dxvk {
     uint32_t            mipLevels    = 0u;
     uint32_t            layers       = 0u;
     uint32_t            usage        = 0u;
+    uint32_t            idleFrames   = 0u;
     DxvkResourceLabel   label;
   };
 
@@ -1262,8 +1268,12 @@ namespace dxvk {
 
     constexpr static uint64_t DedicatedChunkAddress = 1ull << 63u;
 
-    /// Half-second ticks a dead chunk may wait for its locks to go
-    constexpr static uint32_t MaxLockedDeadTicks = 10u;
+    /// Defragmentation ticks a dead chunk may wait for its locks to go: five seconds
+    constexpr static uint32_t MaxLockedDeadTicks = 40u;
+    /// Chunk size of the device pools
+    constexpr static VkDeviceSize DeviceChunkSize = 64ull << 20;
+    /// How often defragmentation takes a step, in milliseconds
+    constexpr static uint32_t DefragTickMs = 125u;
 
     constexpr static VkDeviceSize MinChunkSize =   4ull << 20;
     constexpr static VkDeviceSize MaxChunkSize = 256ull << 20;
@@ -1547,6 +1557,47 @@ namespace dxvk {
             DxvkPagedResource*          resource);
 
     /**
+     * \brief Moves resources to system memory or back, for testing
+     *
+     * Forced resources stay out of device-local memory until released: neither
+     * use nor defragmentation brings them back. The moves happen with the
+     * context's next submissions.
+     * \param [in] count Number of cookies
+     * \param [in] cookies The resources' cookies
+     * \param [in] system \c true to move them out, \c false to bring them back
+     * \returns Number of resources queued to move
+     */
+    uint32_t forceResourcePlacement(
+            uint32_t                    count,
+      const uint64_t*                   cookies,
+            bool                        system);
+
+    /**
+     * \brief Moves images into the spill pool, or back out of it
+     *
+     * They stay in video memory, in the pool the driver demotes first under
+     * memory pressure. For images the application knows it rarely uses.
+     * \param [in] count Number of cookies
+     * \param [in] cookies The resources' cookies
+     * \param [in] spillable Whether they belong in the spill pool
+     * \returns Number of resources queued to move
+     */
+    /**
+     * \brief Share of the driver's budget above which the allocator stops keeping slack
+     *
+     * Below it, defragmentation tolerates some waste. Over it, a VRAM budget the application manages
+     * is already exceeded, so waste goes first. 100 by default: the driver's budget itself.
+     */
+    void setDefragPressurePercent(uint32_t percent) {
+      m_defragPressurePercent.store(percent, std::memory_order_relaxed);
+    }
+
+    uint32_t setResourcesSpillable(
+            uint32_t                    count,
+      const uint64_t*                   cookies,
+            bool                        spillable);
+
+    /**
      * \brief Locks an allocation in place
      *
      * Ensures that the resource is marked as immovable so
@@ -1671,11 +1722,13 @@ namespace dxvk {
 
     alignas(CACHE_LINE_SIZE)
     high_resolution_clock::time_point m_taskDeadline = { };
+    high_resolution_clock::time_point m_fullTaskDeadline = { };
     std::array<DxvkMemoryStats, VK_MAX_MEMORY_HEAPS> m_adapterHeapStats = { };
 
     alignas(CACHE_LINE_SIZE)
     dxvk::mutex               m_resourceMutex;
     std::unordered_map<uint64_t, DxvkPagedResource*> m_resourceMap;
+    std::atomic<uint32_t> m_defragPressurePercent = { 100u };
     std::unordered_map<uint64_t, DxvkResourceLabel>  m_resourceLabels;
     std::unordered_set<std::string>                  m_labelStrings;
 
@@ -1839,7 +1892,8 @@ namespace dxvk {
       const DxvkResourceAllocation*     allocation);
 
     void performTimedTasksLocked(
-            high_resolution_clock::time_point currentTime);
+            high_resolution_clock::time_point currentTime,
+            bool fullTick);
 
     bool enableDefrag() const;
 
